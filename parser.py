@@ -17,53 +17,79 @@ def get_crypto_data():
     except Exception as e:
         return f"Ошибка при запросе к DefiLlama: {e}"
     
+    # 1. ОДНИМ ЗАПРОСОМ СКАЧИВАЕМ ВСЕ МОНЕТЫ ИЗ LUNARCRUSH v4
+    lunar_map = {}
+    try:
+        list_url = "https://lunarcrush.com/api4/public/coins/list/v2?limit=4000"
+        headers = {"Authorization": f"Bearer {LUNARCRUSH_API_KEY}"}
+        list_resp = requests.get(list_url, headers=headers)
+        if list_resp.status_code == 200:
+            list_json = list_resp.json()
+            # В коин-листе v2 данные лежат внутри ключа "data"
+            coins_list = list_json.get("data", [])
+            for item in coins_list:
+                sym = item.get("symbol")
+                if sym:
+                    lunar_map[sym.upper()] = item
+    except Exception as e:
+        print(f"Предупреждение: не удалось предзагрузить список LunarCrush: {e}")
+    
     analyzed_array = []
     
+    # 2. ФИЛЬТРУЕМ И СОПОСТАВЛЯЕМ
     for p in protocols:
         tvl = p.get("tvl", 0)
         token = p.get("symbol")
         
         if token and token != "-" and 10_000_000 <= tvl <= 500_000_000:
-            # 1. Пробуем новый эндпоинт v4 (через coins)
-            lunar_url = f"https://lunarcrush.com/api4/public/coins/{token.lower()}/v1"
-            headers = {"Authorization": f"Bearer {LUNARCRUSH_API_KEY}"}
+            token_upper = token.upper()
+            social_volume = "Нет данных"
             
-            try:
-                lunar_resp = requests.get(lunar_url, headers=headers)
-                
-                # 2. Если по coins 404, пробуем альтернативный эндпоинт topics
-                if lunar_resp.status_code != 200:
-                    lunar_url = f"https://lunarcrush.com/api4/public/topic/{token.lower()}/v1"
-                    lunar_resp = requests.get(lunar_url, headers=headers)
-
-                resp_json = lunar_resp.json()
-                
-                # 3. Достаем данные (в v4 они лежат внутри ключа "data")
-                data_block = resp_json.get("data", {})
-                
-                if isinstance(data_block, list) and len(data_block) > 0:
-                    social_data = data_block[0]
-                elif isinstance(data_block, dict):
-                    social_data = data_block
-                else:
-                    social_data = {}
-
-                # 4. В API v4 метрика называется social_volume_24h
-                social_volume = social_data.get("social_volume_24h", "Нет данных")
-                
-                # На всякий случай проверяем старое название
+            # Шаг А: Ищем токен в глобальном предзагруженном списке
+            if token_upper in lunar_map:
+                coin_item = lunar_map[token_upper]
+                # Извлекаем объем социалки (social_volume_24h)
+                social_volume = coin_item.get("social_volume_24h", coin_item.get("num_posts", "Нет данных"))
                 if social_volume == "Нет данных":
-                    social_volume = social_data.get("social_volume", "Нет данных")
-                    
-            except Exception:
-                social_volume = "Ошибка API"
+                    social_volume = coin_item.get("interactions_24h", "Нет данных")
+            
+            # Шаг Б: ФОЛЛБЭК (если монета мелкая и не попала в топ-4000 списка)
+            if social_volume == "Нет данных":
+                headers = {"Authorization": f"Bearer {LUNARCRUSH_API_KEY}"}
+                # Пробуем найти точечно по тикеру или полному имени
+                for search_term in [token.lower(), p.get("name", "").lower()]:
+                    if not search_term or search_term == "-":
+                        continue
+                    lunar_url = f"https://lunarcrush.com/api4/public/topic/{search_term}/v1"
+                    try:
+                        lunar_resp = requests.get(lunar_url, headers=headers)
+                        if lunar_resp.status_code == 200:
+                            resp_json = lunar_resp.json()
+                            
+                            # Проверяем плоскую структуру топика v4
+                            if "num_posts" in resp_json:
+                                social_volume = resp_json["num_posts"]
+                                break
+                            elif "social_volume_24h" in resp_json:
+                                social_volume = resp_json["social_volume_24h"]
+                                break
+                            elif "data" in resp_json:
+                                d = resp_json["data"]
+                                if isinstance(d, list) and len(d) > 0:
+                                    social_volume = d[0].get("num_posts", d[0].get("social_volume_24h", "Нет данных"))
+                                elif isinstance(d, dict):
+                                    social_volume = d.get("num_posts", d.get("social_volume_24h", "Нет данных"))
+                                if social_volume != "Нет данных":
+                                    break
+                    except Exception:
+                        pass
+                time.sleep(0.3) # Легкая пауза, чтобы не спамить
 
             analyzed_array.append({
-                "ticker": f"${token.upper()}",
+                "ticker": f"${token_upper}",
                 "tvl_change_7d": round(p.get("change_7d", 0), 2) if p.get("change_7d") else 0,
                 "social_mentions": social_volume
             })
-            time.sleep(1) # Пауза, чтобы не забанили за спам
             
             if len(analyzed_array) >= 15:
                 break
@@ -98,7 +124,7 @@ def start_bot():
                             continue
                         
                         if text == "/push":
-                            send_telegram_message(chat_id, "⏳ Скрипт запущен. Анализирую блокчейн и соцсети (около 15-20 сек)...")
+                            send_telegram_message(chat_id, "⏳ Скрипт запущен. Анализирую блокчейн и соцсети...")
                             market_data = get_crypto_data()
                             send_telegram_message(chat_id, f"🔥 <b>Ваш свежий срез рынка:</b>\n<pre>{market_data[:3900]}</pre>")
                         elif text == "/start":
@@ -108,7 +134,7 @@ def start_bot():
             print(f"Ошибка в цикле бота: {e}")
             time.sleep(5)
 
-# --- «КОСТЫЛЬ» ДЛЯ БЕСПЛАТНОГО RENDER ---
+# --- ДЕФОЛТНЫЙ ХЕНДЛЕР ДЛЯ RENDER ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -122,3 +148,4 @@ def run_health_server():
 if __name__ == "__main__":
     threading.Thread(target=run_health_server, daemon=True).start()
     start_bot()
+    
