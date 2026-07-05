@@ -22,16 +22,18 @@ def get_crypto_data():
     
     for p in protocols:
         tvl = p.get("tvl", 0)
-        token = p.get("tokenSymbol")
         
-        # Вилка TVL от 10 млн до 500 млн
-        if token and 10_000_000 <= tvl <= 500_000_000:
+        # ИСПРАВЛЕНИЕ: правильный ключ в базе DefiLlama — это "symbol"
+        token = p.get("symbol")
+        
+        # Фильтр: токен существует, он не равен "-", и TVL от 10 млн до 500 млн
+        if token and token != "-" and 10_000_000 <= tvl <= 500_000_000:
             lunar_url = f"https://lunarcrush.com/api/4/public/coins/{token}"
             headers = {"Authorization": f"Bearer {LUNARCRUSH_API_KEY}"}
             
             try:
                 lunar_resp = requests.get(lunar_url, headers=headers).json()
-                social_volume = lunar_resp.get("data", {}).get("social_volume", 0)
+                social_volume = lunar_resp.get("data", {}).get("social_volume", 0) if "data" in lunar_resp else "Нет данных"
             except:
                 social_volume = "Нет данных"
 
@@ -40,8 +42,9 @@ def get_crypto_data():
                 "tvl_change_7d": round(p.get("change_7d", 0), 2) if p.get("change_7d") else 0,
                 "social_mentions": social_volume
             })
-            time.sleep(1) # Пауза для LunarCrush
+            time.sleep(1) # Пауза, чтобы LunarCrush не заблокировал нас за спам запросами
             
+            # Как только собрали 15 рабочих проектов — отдаем результат
             if len(analyzed_array) >= 15:
                 break
 
@@ -78,7 +81,7 @@ def start_bot():
                         
                         # Если пользователь написал /push
                         if text == "/push":
-                            send_telegram_message(chat_id, "⏳ Начинаю сбор и анализ данных ончейн и соцсетей. Это займет около 15-20 секунд...")
+                            send_telegram_message(chat_id, "⏳ Скрипт запущен. Анализирую блокчейн и соцсети, это займет около 15-20 секунд...")
                             
                             # Запускаем сбор данных
                             market_data = get_crypto_data()
@@ -106,8 +109,5 @@ def run_health_server():
     server.serve_forever()
 
 if __name__ == "__main__":
-    # Запускаем веб-сервер для Render в отдельном потоке
     threading.Thread(target=run_health_server, daemon=True).start()
-    # Запускаем самого Телеграм-бота
     start_bot()
-    
